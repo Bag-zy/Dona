@@ -1,0 +1,8 @@
+langchain-groq
+langgraph
+langgraph-checkpoint-postgres
+copilotkit
+tavily-python
+psycopg2-binary
+psycopg[binary]
+python-dotenv
