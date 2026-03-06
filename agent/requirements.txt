@@ -6,3 +6,5 @@ tavily-python
 psycopg2-binary
 psycopg[binary]
 python-dotenv
+fastapi
+uvicorn
