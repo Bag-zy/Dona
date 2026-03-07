@@ -12,7 +12,7 @@ const serviceAdapter = new ExperimentalEmptyAdapter();
 // 2. Create the CopilotRuntime and connect to the Dona LangGraph agent
 const runtime = new CopilotRuntime({
     agents: {
-        dona_agent: new LangGraphAgent({
+        default: new LangGraphAgent({
             deploymentUrl:
                 process.env.DONA_AGENT_URL || "http://127.0.0.1:8123",
             graphId: "dona_agent",
