@@ -5,7 +5,6 @@ export const auth = createNeonAuth({
   cookies: {
     secret: process.env.NEON_AUTH_COOKIE_SECRET!,
   },
-  trustedOrigins: process.env.NEXT_PUBLIC_APP_URL ? [process.env.NEXT_PUBLIC_APP_URL] : [],
 });
 
 import { type Session as BetterAuthSession } from 'better-auth';
