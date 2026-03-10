@@ -16,6 +16,17 @@ from copilotkit.integrations.fastapi import add_fastapi_endpoint
 from copilotkit import CopilotKitRemoteEndpoint, LangGraphAGUIAgent
 from agent import graph  # Import the compiled graph from agent.py
 
+# --- FIX: Monkey-patch CopilotKit SDK bug ---
+# LangGraphAGUIAgent misses dict_repr required by CopilotKitRemoteEndpoint
+if not hasattr(LangGraphAGUIAgent, "dict_repr"):
+    def dict_repr(self):
+        return {
+            'name': self.name,
+            'description': getattr(self, "description", "") or ""
+        }
+    LangGraphAGUIAgent.dict_repr = dict_repr
+# --------------------------------------------
+
 app = FastAPI()
 
 # Enable CORS for frontend connections
