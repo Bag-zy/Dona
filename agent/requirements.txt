@@ -8,4 +8,4 @@ python-dotenv>=1.0.0,<2.0.0
 langgraph-cli[inmem]>=0.3.5
 langchain-groq>=0.0.1
 langchain-tavily>=0.0.1
-copilotkit>=0.1.63
+copilotkit>=1.0.0
