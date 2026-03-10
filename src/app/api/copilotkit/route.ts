@@ -3,19 +3,19 @@ import {
     ExperimentalEmptyAdapter,
     copilotRuntimeNextJSAppRouterEndpoint,
 } from "@copilotkit/runtime";
+import { LangGraphHttpAgent } from "@copilotkit/runtime/langgraph";
 import { NextRequest } from "next/server";
 
-// 1. Use the empty adapter since we have a remote agent endpoint
+// 1. Use the empty adapter since we have a LangGraph agent
 const serviceAdapter = new ExperimentalEmptyAdapter();
 
-// 2. Create the CopilotRuntime and connect to the self-hosted Dona agent
-//    via its CopilotKit remote endpoint (served by serve.py on Render)
+// 2. Create the CopilotRuntime and connect to the Dona LangGraph agent
 const runtime = new CopilotRuntime({
-    remoteEndpoints: [
-        {
+    agents: {
+        dona_agent: new LangGraphHttpAgent({
             url: `${process.env.DONA_AGENT_URL || "http://127.0.0.1:8123"}/copilotkit`,
-        },
-    ],
+        }),
+    },
 });
 
 // 3. Build a Next.js API route that handles the CopilotKit runtime requests
