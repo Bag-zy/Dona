@@ -13,6 +13,8 @@ const serviceAdapter = new ExperimentalEmptyAdapter();
 const runtime = new CopilotRuntime({
     agents: {
         default: new LangGraphHttpAgent({
+            agentId: "default",
+            description: "Dona AI blog assistant default agent.",
             url: `${process.env.DONA_AGENT_URL || "http://127.0.0.1:8123"}/copilotkit`,
         }),
     },
