@@ -371,7 +371,9 @@ async def chat_node(state: DonaAgentState, config: RunnableConfig) -> Command[Li
             name = fn.get("name") if isinstance(fn, dict) else t.get("name")
         else:
             name = getattr(t, "name", None)
-        if not name or name not in FRONTEND_TOOL_ALLOWLIST or name in seen:
+        if not name or name in seen:
+            continue
+        if name not in FRONTEND_TOOL_ALLOWLIST and not name.startswith("copilotkit"):
             continue
         seen.add(name)
         deduped_frontend.append(t)
