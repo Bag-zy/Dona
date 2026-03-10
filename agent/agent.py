@@ -470,11 +470,26 @@ async def chat_node(state: DonaAgentState, config: RunnableConfig) -> Command[Li
             update={"messages": [response]},
         )
 
+    has_frontend = any(
+        (tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)) not in backend_tool_names
+        for tc in tool_calls
+    )
+    
+    # If the model produced FRONTEND tool calls (like copilotkitSuggest),
+    # deliver them to the client and stop the graph. The client will post back tool results.
+    if has_frontend:
+        return Command(
+            goto=END,
+            update={
+                "messages": [response]
+            },
+        )
+
+    # Standard completion with no tool calls
     return Command(
         goto=END,
         update={"messages": [response]},
     )
-
 
 def route_to_tool_node(response: BaseMessage):
     tool_calls = getattr(response, "tool_calls", None)
