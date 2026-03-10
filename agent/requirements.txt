@@ -8,3 +8,4 @@ psycopg[binary]
 python-dotenv
 fastapi
 uvicorn
+langgraph-cli[inmem]

@@ -27,5 +27,5 @@ COPY . .
 # Expose the port the app runs on
 EXPOSE $PORT
 
-# Command to run the FastAPI application using uvicorn
-CMD uvicorn serve:app --host 0.0.0.0 --port $PORT
+# Command to run the LangGraph development server natively
+CMD ["sh", "-c", "langgraph dev --host 0.0.0.0 --port ${PORT:-8123}"]

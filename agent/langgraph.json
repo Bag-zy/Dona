@@ -5,7 +5,7 @@
         "."
     ],
     "graphs": {
-        "dona_agent": "./agent.py:graph"
+        "default": "./agent.py:graph"
     },
     "env": ".env"
 }
