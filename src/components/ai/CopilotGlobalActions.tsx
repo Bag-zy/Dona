@@ -68,7 +68,7 @@ export function CopilotGlobalActions() {
                 
                 const postsData = await postsRes.json();
                 const categoriesData = await categoriesRes.json();
-                const tagsData = await tagsData.json();
+                const tagsData = await tagsRes.json();
                 const commentsData = await commentsRes.json();
                 
                 setBlogStats({
