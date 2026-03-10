@@ -42,7 +42,7 @@ app.add_middleware(
 sdk = CopilotKitRemoteEndpoint(
     agents=[
         LangGraphAGUIAgent(
-            name="dona_agent",
+            name="default",
             description="Dona AI blog assistant agent.",
             graph=graph,
         )

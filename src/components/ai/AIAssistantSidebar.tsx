@@ -109,7 +109,7 @@ export function AIAssistantSidebar({ children }: { children: React.ReactNode }) 
             <CopilotKit
                 key={key}
                 runtimeUrl="/api/copilotkit"
-                agent="dona_agent"
+                agent="default"
                 threadId={activeThreadUUID}
             >
                 <CopilotGlobalActions />
