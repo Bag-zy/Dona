@@ -1,16 +1,16 @@
 services:
   - type: web
-    name: dona-agent-backend
-    env: python
-    rootDir: agent
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn serve:app --host 0.0.0.0 --port $PORT
+    name: dona-agent
+    env: docker
+    dockerfilePath: ./agent/Dockerfile
+    dockerContext: ./agent
+    plan: starter
     envVars:
-      - key: DATABASE_URL
-        sync: false
       - key: GROQ_API_KEY
         sync: false
       - key: TAVILY_API_KEY
         sync: false
-      - key: OPENAI_API_KEY
+      - key: LANGSMITH_API_KEY
         sync: false
+      - key: PORT
+        value: 8123

@@ -1,327 +1,173 @@
 """
-Dona Agent - AI-powered blog assistant
-Uses Groq (llama-3.3-70b-versatile) + Tavily for research + NeonDB for blog data
-Mirrors the assistant-demo ReAct pattern: chat_node → tool_node → chat_node
+Agent Dona - AI Writing Assistant for Blog Platform
+
+This is the main entry point for the Dona blog assistant agent.
+It helps users write blog posts, generate titles, create SEO metadata,
+and manage their blog content.
 """
 
+# Apply patch for CopilotKit import issue before any other imports
+# This fixes the incorrect import path in copilotkit.langgraph_agent (bug in v0.1.63)
 import sys
-import os
-from dotenv import load_dotenv
 
-# First load the agent's .env for GROQ_API_KEY and TAVILY_API_KEY
-load_dotenv()
-
-# Then load the root .env.local to get the true DATABASE_URL
-env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env.local')
-load_dotenv(env_path, override=True)
-
-# Patch for CopilotKit import issue (same as assistant-demo)
+# Only apply the patch if the module doesn't already exist
 if 'langgraph.graph.graph' not in sys.modules:
     class _MockModule:
         pass
+
     import langgraph
     import langgraph.graph
     import langgraph.graph.state
+
     from langgraph.graph.state import CompiledStateGraph
+
     _mock_graph_module = _MockModule()
     _mock_graph_module.CompiledGraph = CompiledStateGraph
+
     sys.modules['langgraph.graph.graph'] = _mock_graph_module
 
 from typing import Any, List, Optional, Dict
 from typing_extensions import Literal
 from langchain_groq import ChatGroq
-from langchain_core.messages import SystemMessage, BaseMessage, AIMessage
+from langchain_core.messages import SystemMessage, BaseMessage, HumanMessage, AIMessage
 from langchain_core.runnables import RunnableConfig
 from langchain.tools import tool
 from langgraph.graph import StateGraph, END
 from langgraph.types import Command
 from copilotkit import CopilotKitState
 from langgraph.prebuilt import ToolNode
+from langchain_tavily import TavilySearch
+import os
+from dotenv import load_dotenv
 
-# Tavily for web research
-from tavily import TavilyClient
-
-tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY", ""))
-
-# Database connection
-import psycopg2
-import json
-
-def get_db_connection():
-    return psycopg2.connect(os.getenv("DATABASE_URL", ""))
+# Load environment variables
+load_dotenv()
 
 
-class DonaAgentState(CopilotKitState):
-    """Dona agent state - extends CopilotKit state with blog-specific fields."""
-    tools: List[Any] = []
-    # Blog state synced with frontend
-    currentDraft: Dict[str, Any] = {}
-    blogContext: Dict[str, Any] = {}
-    # Planning state (same as assistant-demo)
-    planSteps: List[Dict[str, Any]] = []
-    currentStepIndex: int = -1
-    planStatus: str = ""
+class AgentState(CopilotKitState):
+    """
+    State for the Dona blog assistant agent.
+    
+    Inherits from CopilotKitState and adds blog-specific fields for
+    tracking the current post being edited and content state.
+    """
+    # Current post being edited (if any)
+    currentPostId: Optional[str] = None
+    currentPostTitle: str = ""
+    currentPostContent: str = ""
+    currentPostExcerpt: str = ""
+    currentPostStatus: str = "draft"
+    
+    # Blog statistics for context
+    totalPosts: int = 0
+    totalCategories: int = 0
+    totalTags: int = 0
+    totalComments: int = 0
+    pendingComments: int = 0
 
 
-# ============== Backend Tools ==============
-
-@tool
-def search_web(query: str) -> str:
-    """Search the web using Tavily for research, fact-checking, or finding information for blog posts."""
-    try:
-        results = tavily_client.search(query, max_results=5)
-        output = []
-        for r in results.get("results", []):
-            output.append(f"**{r.get('title', '')}**\n{r.get('content', '')}\nURL: {r.get('url', '')}\n")
-        return "\n---\n".join(output) if output else "No results found."
-    except Exception as e:
-        return f"Search error: {str(e)}"
-
+# ============================================================================
+# Backend Tools - These run on the Python backend
+# ============================================================================
 
 @tool
-def get_posts(limit: int = 10, status: str = "published") -> str:
-    """Fetch blog posts from the database. Use this to get context about existing content."""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT title, slug, excerpt, status, created_at FROM posts WHERE status = %s ORDER BY created_at DESC LIMIT %s",
-            (status, limit)
+def generate_slug(title: str) -> str:
+    """
+    Generate a URL-friendly slug from a title.
+    Converts to lowercase, replaces spaces with hyphens, removes special characters.
+    """
+    import re
+    slug = title.lower().strip()
+    slug = re.sub(r'[^\w\s-]', '', slug)
+    slug = re.sub(r'[\s_-]+', '-', slug)
+    slug = slug.strip('-')
+    return {"slug": slug, "title": title}
+
+
+@tool
+def calculate_reading_time(content: str) -> Dict[str, Any]:
+    """
+    Calculate estimated reading time for content.
+    Assumes average reading speed of 200 words per minute.
+    """
+    words = len(content.split())
+    minutes = max(1, round(words / 200))
+    return {"words": words, "readingTime": minutes}
+
+
+@tool
+def generate_seo_metadata(title: str, content: str, max_title_length: int = 60, max_description_length: int = 160) -> Dict[str, Any]:
+    """
+    Generate SEO-optimized title and meta description from post content.
+    Returns suggestions for SEO title and meta description.
+    """
+    # Extract key themes from content (first 500 chars for summary)
+    content_preview = content[:500] if content else ""
+    
+    return {
+        "suggested_seo_title": title[:max_title_length] if len(title) <= max_title_length else title[:max_title_length-3] + "...",
+        "suggested_meta_description": content_preview[:max_description_length].rsplit(' ', 1)[0] + "..." if len(content_preview) > max_description_length else content_preview,
+        "title_length": len(title),
+        "content_length": len(content),
+    }
+
+
+@tool
+def suggest_tags_from_content(content: str, max_tags: int = 5) -> Dict[str, Any]:
+    """
+    Suggest relevant tags based on content analysis.
+    Extracts key topics and themes from the content.
+    """
+    # Simple keyword extraction (in production, could use NLP)
+    common_tech_terms = [
+        "javascript", "typescript", "python", "react", "node", "api", "database",
+        "css", "html", "web", "mobile", "devops", "cloud", "security", "testing",
+        "ai", "machine-learning", "data", "performance", "architecture", "design"
+    ]
+    
+    content_lower = content.lower()
+    suggested = [term for term in common_tech_terms if term in content_lower][:max_tags]
+    
+    return {"suggested_tags": suggested, "count": len(suggested)}
+
+
+# Initialize Tavily search tool for web research
+def get_tavily_search_tool():
+    """Get Tavily search tool if API key is configured."""
+    tavily_api_key = os.getenv("TAVILY_API_KEY")
+    if tavily_api_key:
+        return TavilySearch(
+            max_results=5,
+            search_depth="advanced",
+            include_answer=True,
+            include_raw_content=False,
         )
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        if not rows:
-            return "No posts found."
-        lines = []
-        for r in rows:
-            lines.append(f"- **{r[0]}** (/{r[1]}) - {r[3]} - {r[2] or 'No excerpt'}")
-        return "\n".join(lines)
-    except Exception as e:
-        return f"Database error: {str(e)}"
+    return None
 
-
-@tool
-def get_post_by_slug(slug: str) -> str:
-    """Fetch a single blog post by its slug for detailed context."""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT title, slug, excerpt, content, status FROM posts WHERE slug = %s", (slug,))
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        if not row:
-            return f"No post found with slug '{slug}'."
-        return f"Title: {row[0]}\nSlug: {row[1]}\nExcerpt: {row[2]}\nStatus: {row[4]}\nContent: {json.dumps(row[3]) if row[3] else 'Empty'}"
-    except Exception as e:
-        return f"Database error: {str(e)}"
-
-
-@tool
-def get_categories() -> str:
-    """Fetch all blog categories from the database."""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT name, slug, description FROM categories ORDER BY name")
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        if not rows:
-            return "No categories found."
-        return "\n".join([f"- {r[0]} (/{r[1]}): {r[2] or 'No description'}" for r in rows])
-    except Exception as e:
-        return f"Database error: {str(e)}"
-
-
-@tool
-def get_tags() -> str:
-    """Fetch all blog tags from the database."""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT name, slug FROM tags ORDER BY name")
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        if not rows:
-            return "No tags found."
-        return ", ".join([r[0] for r in rows])
-    except Exception as e:
-        return f"Database error: {str(e)}"
-
-
-@tool
-def set_plan(steps: List[str]):
-    """Initialize a plan consisting of step descriptions."""
-    return {"initialized": True, "steps": steps}
-
-
-@tool
-def update_plan_progress(step_index: int, status: Literal["pending", "in_progress", "completed", "failed"], note: Optional[str] = None):
-    """Update a single plan step's status."""
-    return {"updated": True, "index": step_index, "status": status, "note": note}
-
-
-@tool
-def complete_plan():
-    """Mark the plan as completed."""
-    return {"completed": True}
-
-
-@tool
-def create_draft(title: str, slug: str, excerpt: str, content: str, category_slug: Optional[str] = None) -> str:
-    """Create a new draft blog post in the database and return its slug."""
-    try:
-        import uuid
-        conn = get_db_connection()
-        cur = conn.cursor()
-        # Build TipTap JSON content
-        tiptap_content = json.dumps({
-            "type": "doc",
-            "content": [{"type": "paragraph", "content": [{"type": "text", "text": p}]} for p in content.split("\n\n") if p.strip()]
-        })
-        cur.execute(
-            "INSERT INTO posts (title, slug, excerpt, content, status, author_id, created_at, updated_at) VALUES (%s, %s, %s, %s, 'draft', 'admin', NOW(), NOW()) RETURNING slug",
-            (title, slug, excerpt, tiptap_content)
-        )
-        result_slug = cur.fetchone()[0]
-        # Attach category if provided
-        if category_slug:
-            cur.execute("SELECT id FROM categories WHERE slug = %s", (category_slug,))
-            cat = cur.fetchone()
-            if cat:
-                cur.execute("SELECT id FROM posts WHERE slug = %s", (result_slug,))
-                post = cur.fetchone()
-                if post:
-                    cur.execute("INSERT INTO post_categories (post_id, category_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (post[0], cat[0]))
-        conn.commit()
-        cur.close()
-        conn.close()
-        return f"Draft created successfully with slug: {result_slug}"
-    except Exception as e:
-        return f"Error creating draft: {str(e)}"
-
-
-@tool
-def update_post(slug: str, title: Optional[str] = None, excerpt: Optional[str] = None, content: Optional[str] = None, status: Optional[str] = None) -> str:
-    """Update an existing blog post by slug. Only provided fields will be updated."""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        updates = []
-        values = []
-        if title:
-            updates.append("title = %s")
-            values.append(title)
-        if excerpt:
-            updates.append("excerpt = %s")
-            values.append(excerpt)
-        if content:
-            tiptap_content = json.dumps({
-                "type": "doc",
-                "content": [{"type": "paragraph", "content": [{"type": "text", "text": p}]} for p in content.split("\n\n") if p.strip()]
-            })
-            updates.append("content = %s")
-            values.append(tiptap_content)
-        if status and status in ["draft", "published", "scheduled"]:
-            updates.append("status = %s")
-            values.append(status)
-            if status == "published":
-                updates.append("published_at = NOW()")
-        if not updates:
-            return "No fields to update."
-        updates.append("updated_at = NOW()")
-        values.append(slug)
-        cur.execute(f"UPDATE posts SET {', '.join(updates)} WHERE slug = %s", values)
-        conn.commit()
-        rows_affected = cur.rowcount
-        cur.close()
-        conn.close()
-        return f"Post '{slug}' updated successfully ({rows_affected} row(s) affected)."
-    except Exception as e:
-        return f"Error updating post: {str(e)}"
-
-
-@tool
-def delete_post(slug: str) -> str:
-    """Delete a blog post by slug."""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM posts WHERE slug = %s", (slug,))
-        conn.commit()
-        rows_affected = cur.rowcount
-        cur.close()
-        conn.close()
-        if rows_affected == 0:
-            return f"No post found with slug '{slug}'."
-        return f"Post '{slug}' deleted successfully."
-    except Exception as e:
-        return f"Error deleting post: {str(e)}"
-
-
-@tool
-def get_dashboard_stats() -> str:
-    """Get blog dashboard statistics: total posts, published posts, draft posts, total comments, total subscribers."""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM posts")
-        total_posts = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM posts WHERE status = 'published'")
-        published = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM posts WHERE status = 'draft'")
-        drafts = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM comments")
-        total_comments = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM newsletter_subscribers")
-        total_subs = cur.fetchone()[0]
-        cur.close()
-        conn.close()
-        return f"Total Posts: {total_posts} | Published: {published} | Drafts: {drafts} | Comments: {total_comments} | Subscribers: {total_subs}"
-    except Exception as e:
-        return f"Error getting stats: {str(e)}"
-
-
-from tools_extended import extended_tools
 
 backend_tools = [
-    search_web,
-    get_posts,
-    get_post_by_slug,
-    get_categories,
-    get_tags,
-    create_draft,
-    update_post,
-    delete_post,
-    get_dashboard_stats,
-    set_plan,
-    update_plan_progress,
-    complete_plan,
-] + extended_tools
+    generate_slug,
+    calculate_reading_time,
+    generate_seo_metadata,
+    suggest_tags_from_content,
+]
 
-backend_tool_names = [t.name for t in backend_tools]
+# Add Tavily search tool if available
+tavily_tool = get_tavily_search_tool()
+if tavily_tool:
+    backend_tools.append(tavily_tool)
 
-# Frontend tool allowlist — all admin panel actions the agent can trigger
-FRONTEND_TOOL_ALLOWLIST = {
-    # Post editor actions
-    "setDraftTitle",
-    "setDraftSlug",
-    "setDraftContent",
-    "setDraftExcerpt",
-    "setDraftTags",
-    "setDraftCategories",
-    "setDraftSeoMeta",
-    "setDraftFeaturedImage",
-    "setDraftStatus",
-    "publishDraft",
-    "saveDraft",
+backend_tool_names = [tool.name for tool in backend_tools]
+
+
+# ============================================================================
+# Frontend Tool Allowlist - Tools that run on the client side
+# ============================================================================
+
+FRONTEND_TOOL_ALLOWLIST = set([
     # Navigation actions
     "navigateToPage",
     "navigateToPostEditor",
-    "navigateToPosts",
     "navigateToDashboard",
     "navigateToSettings",
     "navigateToComments",
@@ -331,179 +177,279 @@ FRONTEND_TOOL_ALLOWLIST = {
     "navigateToMedia",
     "navigateToNewsletter",
     "navigateToDeveloper",
-    # Dashboard actions
-    "refreshDashboard",
+    "navigateToPosts",
     "refreshPage",
-    "showRelatedPosts",
+    
+    # Post editing actions (to be implemented in frontend)
+    "setPostTitle",
+    "setPostContent",
+    "setPostExcerpt",
+    "setPostSlug",
+    "setPostStatus",
+    "setPostFeaturedImage",
+    "appendPostContent",
+    
+    # Category/Tag actions
+    "createCategory",
+    "updateCategory",
+    "deleteCategory",
+    "createTag",
+    "updateTag",
+    "deleteTag",
+    
     # Comment moderation
     "approveComment",
-    "deleteComment",
+    "rejectComment",
     "markCommentSpam",
-}
+    "replyToComment",
+])
 
 
-async def chat_node(state: DonaAgentState, config: RunnableConfig) -> Command[Literal["tool_node", "__end__"]]:
-    """Dona chat node - ReAct pattern with Groq LLM."""
+async def chat_node(state: AgentState, config: RunnableConfig) -> Command[Literal["tool_node", "__end__"]]:
+    """
+    Main chat node for Agent Dona.
+    Handles conversation with the user and coordinates tool calls for blog operations.
+    """
+    print(f"Dona agent state: {state}")
 
-    # 1. Model
-    model = ChatGroq(
-        model="llama-3.3-70b-versatile",
-        api_key=os.getenv("GROQ_API_KEY", ""),
-        temperature=0.7,
-    )
+    # 1. Define the model - Using Groq with Llama 3.3 70B
+    model = ChatGroq(model="llama-3.3-70b-versatile")
 
-    # 2. Prepare tools (dedupe frontend tools + backend tools)
-    raw_tools = list(state.get("tools", []) or [])
+    # 2. Extract and dedupe frontend tools
+    def _extract_tool_name(tool: Any) -> Optional[str]:
+        try:
+            if isinstance(tool, dict):
+                fn = tool.get("function", {}) if isinstance(tool.get("function", {}), dict) else {}
+                name = fn.get("name") or tool.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name
+                return None
+            name = getattr(tool, "name", None)
+            if isinstance(name, str) and name.strip():
+                return name
+            return None
+        except Exception:
+            return None
+
+    # Collect frontend tools from state
+    raw_tools = (state.get("tools", []) or [])
     try:
         ck = state.get("copilotkit", {}) or {}
         raw_actions = ck.get("actions", []) or []
-        if isinstance(raw_actions, list):
-            raw_tools.extend(raw_actions)
+        if isinstance(raw_actions, list) and raw_actions:
+            raw_tools = [*raw_tools, *raw_actions]
     except Exception:
         pass
 
-    deduped_frontend: list = []
-    seen: set = set()
+    deduped_frontend_tools: List[Any] = []
+    seen: set[str] = set()
     for t in raw_tools:
-        name = None
-        if isinstance(t, dict):
-            fn = t.get("function", {})
-            name = fn.get("name") if isinstance(fn, dict) else t.get("name")
-        else:
-            name = getattr(t, "name", None)
-        if not name or name in seen:
+        name = _extract_tool_name(t)
+        if not name:
             continue
-        if name not in FRONTEND_TOOL_ALLOWLIST and not name.startswith("copilotkit"):
+        if name not in FRONTEND_TOOL_ALLOWLIST:
+            continue
+        if name in seen:
             continue
         seen.add(name)
-        deduped_frontend.append(t)
+        deduped_frontend_tools.append(t)
+
+    # Cap frontend tools
+    MAX_FRONTEND_TOOLS = 110
+    if len(deduped_frontend_tools) > MAX_FRONTEND_TOOLS:
+        deduped_frontend_tools = deduped_frontend_tools[:MAX_FRONTEND_TOOLS]
 
     model_with_tools = model.bind_tools(
-        [*deduped_frontend, *backend_tools],
+        [*deduped_frontend_tools, *backend_tools],
         parallel_tool_calls=False,
     )
 
-    # 3. System message
-    plan_steps = state.get("planSteps", []) or []
-    plan_status = state.get("planStatus", "")
-    current_draft = state.get("currentDraft", {}) or {}
+    # 3. Build system message for blog assistant
+    current_post_id = state.get("currentPostId", "")
+    current_post_title = state.get("currentPostTitle", "")
+    current_post_content = state.get("currentPostContent", "")
+    current_post_excerpt = state.get("currentPostExcerpt", "")
+    current_post_status = state.get("currentPostStatus", "draft")
+    
+    total_posts = state.get("totalPosts", 0)
+    total_categories = state.get("totalCategories", 0)
+    total_tags = state.get("totalTags", 0)
+    total_comments = state.get("totalComments", 0)
+    pending_comments = state.get("pendingComments", 0)
 
     system_message = SystemMessage(
         content=(
-            "You are Agent Dona, the AI-powered blog assistant for the Dona Blog Platform.\n"
-            "You are FULLY INTEGRATED into the admin panel. You can:\n\n"
-            "CONTENT CREATION & EDITING:\n"
-            "- Draft new blog posts using setDraftTitle, setDraftContent, setDraftExcerpt, setDraftSlug\n"
-            "- Set tags and categories using setDraftTags, setDraftCategories\n"
-            "- Set SEO metadata using setDraftSeoMeta\n"
-            "- Set featured images using setDraftFeaturedImage\n"
-            "- Publish drafts using publishDraft or saveDraft\n"
-            "- Create posts directly in the database using create_draft\n"
-            "- Update existing posts using update_post\n"
-            "- Delete posts using delete_post\n\n"
-            "RESEARCH & INTELLIGENCE:\n"
-            "- Research any topic with search_web (Tavily)\n"
-            "- Read existing blog posts with get_posts, get_post_by_slug\n"
-            "- Browse categories (get_categories) and tags (get_tags)\n"
-            "- Get dashboard stats with get_dashboard_stats\n\n"
-            "NAVIGATION:\n"
-            "- Use specific navigation actions for admin pages:\n"
-            "  * navigateToDashboard → /admin\n"
-            "  * navigateToPosts → /admin/posts\n"
-            "  * navigateToPostEditor → /admin/posts/new\n"
-            "  * navigateToCategories → /admin/categories (NOTE: Categories are created via a popup on this page, there is no /new route)\n"
-            "  * navigateToTags → /admin/tags\n"
-            "  * navigateToUsers → /admin/users\n"
-            "  * navigateToMedia → /admin/media\n"
-            "  * navigateToComments → /admin/comments\n"
-            "  * navigateToNewsletter → /admin/newsletter\n"
-            "  * navigateToDeveloper → /admin/developer\n"
-            "  * navigateToSettings → /admin/settings\n"
-            "- Use navigateToPage only for custom paths not listed above\n"
-            "- Use refreshPage after any database mutation to update the UI\n\n"
-            "TAXONOMY & MEDIA:\n"
-            "- Create, update, or delete categories and tags using the create/update/delete tools\n"
-            "- IMPORTANT: Managing categories and tags occurs on their respective main pages (/admin/categories or /admin/tags) via popup dialogs. Never try to navigate to a /new subpage for them.\n"
-            "- View media gallery (get_media) and delete media (delete_media)\n\n"
-            "USERS & DEVELOPER:\n"
-            "- View users (get_users) and update roles (update_user_role)\n"
-            "- Manage API keys: get_api_keys, revoke_api_key\n\n"
-            "SETTINGS & COMMENTS:\n"
-            "- View and update site settings (get_settings, update_settings)\n"
-            "- Read comments (get_comments) and moderate them (update_comment_status)\n\n"
-            "PLANNING:\n"
-            "- For complex tasks (e.g. 'write 3 blog posts about AI'), create a multi-step plan with set_plan\n"
-            "- Track progress with update_plan_progress and complete with complete_plan\n"
-            "- Proceed automatically between steps without waiting for user confirmation\n\n"
-            f"Current draft state: {json.dumps(current_draft) if current_draft else '(no active draft)'}\n"
-            f"Plan status: {plan_status}\n"
-            f"Plan steps: {[s.get('title', s) for s in plan_steps]}\n\n"
-            "RULES:\n"
-            "1. When asked to create content, ALWAYS use the frontend tools (setDraftTitle etc.) to populate the editor in real-time.\n"
-            "2. For research, use search_web to find accurate, up-to-date information.\n"
-            "3. For multi-step tasks, create a plan first, then execute each step.\n"
-            "4. Be creative, professional, and SEO-aware in your writing.\n"
-            "5. After mutations (create/update/delete any record), ALWAYS call refreshPage so the user's screen updates.\n"
-            "6. After mutations, confirm what changed. Never claim a change you didn't make.\n"
-            "7. Keep responses concise but informative.\n"
+            "You are Agent Dona, an AI writing assistant for a blog platform.\n\n"
+            
+            "## Your Capabilities\n"
+            "- Help write and edit blog posts\n"
+            "- Generate catchy titles and headlines\n"
+            "- Create SEO-optimized metadata (titles, meta descriptions)\n"
+            "- Suggest relevant tags and categories\n"
+            "- Calculate reading time for content\n"
+            "- Help moderate comments\n"
+            "- Navigate the blog admin interface\n\n"
+            
+            "## Current Context\n"
+            f"- Total posts: {total_posts}\n"
+            f"- Total categories: {total_categories}\n"
+            f"- Total tags: {total_tags}\n"
+            f"- Total comments: {total_comments} ({pending_comments} pending moderation)\n\n"
+            
+            "## Current Post Being Edited\n"
+            f"- Post ID: {current_post_id or '(none)'}\n"
+            f"- Title: {current_post_title or '(untitled)'}\n"
+            f"- Status: {current_post_status}\n"
+            f"- Excerpt: {current_post_excerpt[:100] + '...' if current_post_excerpt and len(current_post_excerpt) > 100 else current_post_excerpt or '(no excerpt)'}\n"
+            f"- Content length: {len(current_post_content)} characters\n\n"
+            
+            "## Blog Data Model\n"
+            "- **Posts**: id, title, slug, excerpt, content (TipTap JSON), featuredImage, status (draft/published/scheduled), authorId, publishedAt, readingTime, views\n"
+            "- **Categories**: id, name, slug, description (many-to-many with posts)\n"
+            "- **Tags**: id, name, slug (many-to-many with posts)\n"
+            "- **Comments**: id, postId, userId, parentId (for replies), content, status (pending/approved/spam/trash)\n"
+            "- **Media**: id, url, type, fileName, mimeType, size\n\n"
+            
+            "## Guidelines\n"
+            "1. **Writing Assistance**: When helping write content, be creative but professional. Match the user's tone.\n"
+            "2. **SEO**: Keep SEO titles under 60 characters and meta descriptions under 160 characters.\n"
+            "3. **Slugs**: Generate URL-friendly slugs from titles (lowercase, hyphens, no special chars).\n"
+            "4. **Tags**: Suggest relevant tags based on content topics. Max 5-7 tags per post.\n"
+            "5. **Navigation**: Use navigation tools to help users move between admin pages.\n"
+            "6. **Comments**: Help moderate comments politely. Draft replies when requested.\n\n"
+            
+            "## Tool Usage\n"
+            "- Use `generate_slug` to create URL slugs from titles\n"
+            "- Use `calculate_reading_time` to estimate reading duration\n"
+            "- Use `generate_seo_metadata` for SEO suggestions\n"
+            "- Use `suggest_tags_from_content` to recommend tags\n"
+            "- Use navigation tools (navigateToPage, etc.) to help users move around\n"
+            "- Use refreshPage after database changes to update the UI\n\n"
+            
+            "## Important Rules\n"
+            "- Always be helpful and professional\n"
+            "- If you don't know something, say so\n"
+            "- Never make up data or statistics\n"
+            "- Respect the user's writing style and preferences\n"
+            "- When editing content, preserve the user's voice"
         )
     )
 
-    # 4. Trim history and invoke
-    messages = (state.get("messages", []) or [])[-12:]
+    # 4. Handle frontend tool calls (wait for client execution)
+    full_messages = state.get("messages", []) or []
+    
+    try:
+        if full_messages:
+            last_msg = full_messages[-1]
+            if isinstance(last_msg, AIMessage):
+                pending_frontend_call = False
+                for tc in getattr(last_msg, "tool_calls", []) or []:
+                    name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+                    if name and name not in backend_tool_names:
+                        pending_frontend_call = True
+                        break
+                if pending_frontend_call:
+                    return Command(
+                        goto=END,
+                        update={
+                            "currentPostId": state.get("currentPostId"),
+                            "currentPostTitle": state.get("currentPostTitle", ""),
+                            "currentPostContent": state.get("currentPostContent", ""),
+                            "currentPostExcerpt": state.get("currentPostExcerpt", ""),
+                            "currentPostStatus": state.get("currentPostStatus", "draft"),
+                            "totalPosts": state.get("totalPosts", 0),
+                            "totalCategories": state.get("totalCategories", 0),
+                            "totalTags": state.get("totalTags", 0),
+                            "totalComments": state.get("totalComments", 0),
+                            "pendingComments": state.get("pendingComments", 0),
+                        },
+                    )
+    except Exception:
+        pass
 
-    response = await model_with_tools.ainvoke(
-        [system_message, *messages],
-        config,
-    )
+    # 5. Trim history and invoke model
+    trimmed_messages = full_messages[-12:]
+    
+    response = await model_with_tools.ainvoke([
+        system_message,
+        *trimmed_messages,
+    ], config)
 
-    # 5. Route
-    tool_calls = getattr(response, "tool_calls", []) or []
-    has_backend = any(
-        (tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)) in backend_tool_names
-        for tc in tool_calls
-    )
-
-    if has_backend:
+    # 6. Route to tool node if backend tools need execution
+    if route_to_tool_node(response):
+        print("Routing to tool node for backend tool execution")
         return Command(
             goto="tool_node",
-            update={"messages": [response]},
-        )
-
-    has_frontend = any(
-        (tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)) not in backend_tool_names
-        for tc in tool_calls
-    )
-    
-    # If the model produced FRONTEND tool calls (like copilotkitSuggest),
-    # deliver them to the client and stop the graph. The client will post back tool results.
-    if has_frontend:
-        return Command(
-            goto=END,
             update={
-                "messages": [response]
-            },
+                "messages": [response],
+                "currentPostId": state.get("currentPostId"),
+                "currentPostTitle": state.get("currentPostTitle", ""),
+                "currentPostContent": state.get("currentPostContent", ""),
+                "currentPostExcerpt": state.get("currentPostExcerpt", ""),
+                "currentPostStatus": state.get("currentPostStatus", "draft"),
+                "totalPosts": state.get("totalPosts", 0),
+                "totalCategories": state.get("totalCategories", 0),
+                "totalTags": state.get("totalTags", 0),
+                "totalComments": state.get("totalComments", 0),
+                "pendingComments": state.get("pendingComments", 0),
+            }
         )
 
-    # Standard completion with no tool calls
+    # 7. Check for frontend tool calls
+    try:
+        tool_calls = getattr(response, "tool_calls", []) or []
+    except Exception:
+        tool_calls = []
+    
+    has_frontend_tool_calls = False
+    for tc in tool_calls:
+        name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+        if name and name not in backend_tool_names:
+            has_frontend_tool_calls = True
+            break
+
+    # 8. Return response
     return Command(
         goto=END,
-        update={"messages": [response]},
+        update={
+            "messages": [response],
+            "currentPostId": state.get("currentPostId"),
+            "currentPostTitle": state.get("currentPostTitle", ""),
+            "currentPostContent": state.get("currentPostContent", ""),
+            "currentPostExcerpt": state.get("currentPostExcerpt", ""),
+            "currentPostStatus": state.get("currentPostStatus", "draft"),
+            "totalPosts": state.get("totalPosts", 0),
+            "totalCategories": state.get("totalCategories", 0),
+            "totalTags": state.get("totalTags", 0),
+            "totalComments": state.get("totalComments", 0),
+            "pendingComments": state.get("pendingComments", 0),
+        },
     )
 
-def route_to_tool_node(response: BaseMessage):
+
+def route_to_tool_node(response: BaseMessage) -> bool:
+    """
+    Route to tool node if any tool call matches a backend tool name.
+    """
     tool_calls = getattr(response, "tool_calls", None)
     if not tool_calls:
         return False
-    return any(tc.get("name") in backend_tool_names for tc in tool_calls)
+
+    for tool_call in tool_calls:
+        name = tool_call.get("name")
+        if name in backend_tool_names:
+            return True
+    return False
 
 
-# Build the graph
-workflow = StateGraph(DonaAgentState)
+# ============================================================================
+# Workflow Graph Definition
+# ============================================================================
+
+workflow = StateGraph(AgentState)
 workflow.add_node("chat_node", chat_node)
 workflow.add_node("tool_node", ToolNode(tools=backend_tools))
 workflow.add_edge("tool_node", "chat_node")
 workflow.set_entry_point("chat_node")
-# Compile the workflow without manual checkpointer 
-# (LangGraph API handles persistence automatically using POSTGRES_URI)
+
 graph = workflow.compile()

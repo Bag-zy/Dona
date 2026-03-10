@@ -115,15 +115,9 @@ export function AIAssistantSidebar({ children }: { children: React.ReactNode }) 
                 <CopilotGlobalActions />
                 <DynamicCopilotSuggestions />
                 <CopilotSidebar
-                    instructions={
-                        "You are Agent Dona, an AI writing assistant for a blog platform. " +
-                        "You help the user write blog posts, come up with titles, suggest SEO metadata, " +
-                        "and research topics using your web search tools. " +
-                        "You can access the current editor state."
-                    }
                     labels={{
                         title: "Agent Dona",
-                        initial: "Hi! I'm Agent Dona. How can I help you with your blog today?",
+                        initial: "Hi! I'm Agent Dona, your AI writing assistant. I can help you write blog posts, generate titles, create SEO metadata, and manage your blog content. What would you like to work on?",
                     }}
                     suggestions={(() => {
                         if (pathname.includes('/admin/posts/new') || pathname.includes('/admin/posts/edit')) {

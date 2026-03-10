@@ -1,18 +1,39 @@
-# Python caches and environments
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-venv/
+*.so
+.Python
 .venv/
+venv/
 ENV/
-env/
 
-# Environment variables
+# Environment files (will be set via Render dashboard)
 .env
-.env.*
+.env.local
+.env.*.local
 
-# LangGraph API
-.langgraph_api/
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
 
-# Miscellaneous
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Testing
+tests/
+*.test.py
+pytest.ini
+
+# Misc
+*.log
+*.md
 .DS_Store
+Thumbs.db
